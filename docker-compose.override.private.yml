@@ -1,26 +1,55 @@
 services:
-  flowise:
-    ports:
-      - 127.0.0.1:3001:3001
-
   open-webui:
     ports:
       - 127.0.0.1:8080:8080
 
   n8n:
     ports:
-      - 127.0.0.1:5678:5678
+      - 0.0.0.0:5678:5678  # was 127.0.0.1, opened for bridge0 access from Cortex.app per Path A — TODO pf rules
+    environment:
+      - NODE_FUNCTION_ALLOW_EXTERNAL=*
+      - NODE_FUNCTION_ALLOW_BUILTIN=*
+      - N8N_RESTRICT_ENVIRONMENT_VARIABLES_ACCESS=false
+      - N8N_RUNNERS_ENABLED=false
+      # 2026-04-09: n8n 2.x defaults restrictFileAccessTo to ~/.n8n-files,
+      # which blocks the ReadWriteFile node from touching anything under
+      # /data/shared (the bind mount used by rentals + any other workflow
+      # that persists state alongside the host). Allow both the n8n user
+      # folder AND the shared mount.
+      - N8N_RESTRICT_FILE_ACCESS_TO=/data/shared;/home/node/.n8n-files
+      # 2026-04-11: container TZ was unset (UTC) but Desk is EDT. A workflow
+      # with cron `0 1 * * *` and no settings.timezone fires at 01:00 UTC =
+      # 21:00 EDT the previous day — four hours early and BEFORE the Brain
+      # overnight model swap at 22:45 EDT. Pin both TZ (affects `date` inside
+      # the container + any NodeJS-native Date instantiations) and
+      # GENERIC_TIMEZONE (n8n's own Schedule/Cron trigger default). Required
+      # by Phase 5b Nightly Triage workflow (01:00 local). See brainstorm.db
+      # insight cortex-n8n-tz-fix-2026-04-11.
+      - TZ=America/New_York
+      - GENERIC_TIMEZONE=America/New_York
+    healthcheck:
+      # 2026-04-07 Path A close-out (audit F6): bumped timeout 5s → 15s.
+      # The node-spawn cold-start eats more than 5 s on a busy host even
+      # though the real /healthz returns in <50 ms when curled directly.
+      # Container had been "unhealthy" for 22 h prior to this fix.
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5678/healthz', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    restart: on-failure
 
   qdrant:
     ports:
-      - 127.0.0.1:6333:6333
-      - 127.0.0.1:6334:6334
+      - 0.0.0.0:6333:6333  # was 127.0.0.1, opened for bridge0 access from Cortex.app per Path A — TODO pf rules
+      - 0.0.0.0:6334:6334  # was 127.0.0.1, gRPC sibling of 6333
 
-  neo4j:
-    ports:
-      - 127.0.0.1:7473:7473
-      - 127.0.0.1:7474:7474
-      - 127.0.0.1:7687:7687
+  # DISABLED 2026-03-28: Mac Mini is production Neo4j target
+  # neo4j:
+  #   ports:
+  #     - 127.0.0.1:7473:7473
+  #     - 127.0.0.1:7474:7474
+  #     - 127.0.0.1:7687:7687
 
   langfuse-worker:
     ports:
@@ -28,7 +57,7 @@ services:
 
   langfuse-web:
     ports:
-      - 127.0.0.1:3000:3000
+      - 0.0.0.0:3000:3000  # was 127.0.0.1, opened for bridge0 access from Cortex.app per Path A — TODO pf rules
 
   clickhouse:
     ports:
@@ -43,15 +72,28 @@ services:
 
   postgres:
     ports:
-      - 127.0.0.1:5433:5432                
+      - 127.0.0.1:5433:5432
+    restart: on-failure                
 
   redis:
     ports:
       - 127.0.0.1:6379:6379
+    # 2026-04-07 Path A close-out: langfuse-web and langfuse-worker both ship
+    # with REDIS_AUTH=LOCALONLYREDIS hard-coded into their env. The valkey
+    # service in the base compose has no requirepass, so the worker's AUTH
+    # command was being rejected by valkey ("ERR AUTH called without any
+    # password configured"), ioredis treated that as fatal, and the
+    # bull:trace-upsert queue stalled — every Cortex trace landed in HTTP 207
+    # at the web ingestion endpoint but never made it to Clickhouse. Setting
+    # requirepass here aligns valkey with the worker/web env. REDISCLI_AUTH
+    # makes redis-cli (and the upstream healthcheck) auth automatically.
+    command: valkey-server --save 30 1 --loglevel warning --requirepass LOCALONLYREDIS
+    environment:
+      - REDISCLI_AUTH=LOCALONLYREDIS
 
   searxng:
     ports:
-      - 127.0.0.1:8081:8080
+      - 0.0.0.0:8081:8080
 
   ollama-cpu:
     ports:
