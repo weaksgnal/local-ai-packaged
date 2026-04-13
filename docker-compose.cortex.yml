@@ -1,0 +1,137 @@
+# Cortex overlay for the localai compose stack (Desk, OrbStack).
+#
+# PROMOTED LIVE 2026-04-06 19:14 EDT during Path A topology migration.
+# This file IS the live overlay — running services are cortex-vault-api and
+# cortex-neo4j-cortex. Both healthy, both on bridge0, both reading the env
+# vars defined below.
+#
+# Bring up alongside the rest of the stack:
+#
+#   cd /Users/ianarthur/local-ai
+#   DOCKER_CONTEXT=orbstack docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.override.private.yml \
+#     -f docker-compose.cortex.yml \
+#     -p localai up -d neo4j-cortex vault-api
+#
+# (STAGED banner stripped 2026-04-07 by Path A close-out audit F5 — the file
+# had been live in production for 22 h while the header still claimed it
+# wasn't dropped in yet.)
+#
+# Path A topology (locked 2026-04-06):
+#   - Brain (10.0.0.1) runs ollama only.
+#   - Desk  (10.0.0.2) runs everything else, including neo4j-cortex + vault-api.
+#   - neo4j-brain (the old localai neo4j on 7475/7688) is PARKED — see the
+#     commented block at the bottom of this file. Volume `neo4j-brain-data`
+#     is preserved on the OrbStack engine; nothing here destroys it.
+#
+# Port assignments verified 2026-04-06:
+#   - 7474/7687 are FREE (neo4j-brain runs on 7475/7688). neo4j-cortex claims them.
+#   - 8000 is the vault-api port called out in CortexCore Constants.swift.
+
+services:
+
+  # ── Neo4j Cortex (primary knowledge graph) ─────────────────────────
+  # Heap/page-cache sized for Desk's 16 GB ceiling alongside the rest of
+  # the localai stack. Bump if Desk gets a RAM upgrade.
+  neo4j-cortex:
+    image: neo4j:5-community
+    container_name: cortex-neo4j-cortex
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_CORTEX_PASSWORD:-cortex-desk}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1g
+      - NEO4J_server_memory_pagecache_size=512m
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+    volumes:
+      - neo4j-cortex-data:/data
+      - neo4j-cortex-logs:/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7474/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── vault-api (FastAPI gateway) ────────────────────────────────────
+  # Build context is the Cortex repo's vault-api/ directory. The relative
+  # path assumes the Cortex repo lives at:
+  #   /Users/ianarthur/Documents/Claude/Projects/App Lab/Cortex
+  # If that ever moves, update build.context here AND in any sibling
+  # compose file that references it.
+  vault-api:
+    build:
+      context: "../Documents/Claude/Projects/App Lab/Cortex/vault-api"
+    image: cortex-vault-api:local
+    container_name: cortex-vault-api
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - VAULT_NEO4J_URI=bolt://neo4j-cortex:7687
+      - VAULT_NEO4J_USER=neo4j
+      - VAULT_NEO4J_PASSWORD=${NEO4J_CORTEX_PASSWORD:-cortex-desk}
+      - VAULT_QDRANT_URL=http://qdrant:6333
+      # ollama lives on Brain, reachable via the Thunderbolt bridge IP.
+      # OrbStack containers cannot bind to host bridge IPs, but they CAN
+      # reach them outbound — so this URL works from inside the container.
+      - VAULT_OLLAMA_URL=http://10.0.0.1:11434
+      - VAULT_EMBEDDING_MODEL=mxbai-embed-large
+      - VAULT_EMBEDDING_DIM=1024
+      - VAULT_HOST=0.0.0.0
+      - VAULT_PORT=8000
+      # CORS: lock to the Thunderbolt subnet + localhost. Override via env
+      # if a browser on a non-bridge interface needs access.
+      - VAULT_CORS_ORIGINS=http://10.0.0.1,http://10.0.0.2,http://10.0.0.3,http://localhost
+    depends_on:
+      neo4j-cortex:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  neo4j-cortex-data:
+  neo4j-cortex-logs:
+
+# ── ARCHIVED 2026-04-13: neo4j-brain — EXPIRY 2026-07-12 ───────────────
+# Audit complete (2026-04-13). Volume `neo4j-brain-data` contained:
+#   992 nodes (339 Tags, 278 Convs, 233 Insights, 111 Sessions, 28 Projects,
+#   3 People), 1685 relationships — Second Brain schema, stranded 2026-04-06.
+# Diff result: ZERO unique data vs ~/memory/brainstorm.db. One brainstorm.db
+# edge not in brain-data. All 174 CONNECTS_TO edges exported to
+#   /tmp/brain_data_edges.json (ephemeral; archive copy in session logs).
+# Decision: brainstorm.db is canonical. brain-data has no unique content.
+# Volume preserved until 2026-07-12 as a safety net, then: docker volume rm neo4j-brain-data
+#
+# Personal knowledge now synced nightly to neo4j-cortex as :BrainInsight/:BrainProject
+# labels via scripts/sync_brainstorm_to_neo4j.py (LaunchAgent 02:30).
+#
+# To revive for a different purpose (e.g. CGTS concept graph — see
+# Constants.swift `neo4jCGTSBoltURL` block), drop this back into the
+# stack on alternate ports so it doesn't collide with neo4j-cortex:
+#
+#   neo4j-brain:
+#     image: neo4j:5-community
+#     container_name: localai-neo4j-brain
+#     ports:
+#       - "7475:7474"
+#       - "7688:7687"
+#     environment:
+#       - NEO4J_AUTH=neo4j/${NEO4J_BRAIN_PASSWORD:-changeme}
+#     volumes:
+#       - neo4j-brain-data:/data
+#     restart: unless-stopped
+#
+# (And add `neo4j-brain-data:` to the top-level `volumes:` block.)
