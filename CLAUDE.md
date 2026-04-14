@@ -1,6 +1,6 @@
 Infrastructure only — no project code lives here.
 
-Docker start: `docker compose -p localai -f docker-compose.yml -f docker-compose.override.private.yml up -d`
+Docker start: `docker compose -p local-ai -f docker-compose.yml -f docker-compose.override.private.yml up -d`
 NEVER plain `docker compose up` — creates broken project without port bindings.
 
 Services: n8n(:5678), Qdrant(:6333), LangFuse(:3000), SearXNG(:8081), Open-WebUI(:8080), Postgres(:5433), Redis(:6379).
