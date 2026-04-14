@@ -1,0 +1,31 @@
+# SearXNG engine overrides — TRACKED in git.
+#
+# Purpose: unlock non-English engines for CGTS discovery_swarm's 6th persona
+# without un-gitignoring the full settings.yml (which holds server.secret_key
+# and other machine-local state).
+#
+# Workflow after editing this file:
+#   ./bootstrap_searxng.sh && docker compose -p local-ai \
+#     -f docker-compose.yml -f docker-compose.override.private.yml \
+#     restart searxng
+#
+# Semantics: each listed engine's `disabled:` field is flipped to the value
+# below in the machine-local settings.yml. No other fields in settings.yml
+# are touched. Engines not listed here are left alone. Script is idempotent.
+#
+# Scope: only the 4 general-web engines below. Image/video/news/music
+# variants of these engines are intentionally NOT listed — keep them
+# disabled (upstream defaults).
+#
+# Known quirk: `naver` often returns 0 results due to upstream bot rejection.
+# That's an engine-side behavior, not a config failure. Do not treat as a
+# bootstrap regression.
+engines:
+  - name: baidu
+    disabled: false
+  - name: sogou
+    disabled: false
+  - name: yandex
+    disabled: false
+  - name: naver
+    disabled: false
