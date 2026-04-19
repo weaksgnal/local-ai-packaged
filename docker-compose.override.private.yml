@@ -39,10 +39,7 @@ services:
       start_period: 60s
     restart: on-failure
 
-  qdrant:
-    ports:
-      - 0.0.0.0:6333:6333  # was 127.0.0.1, opened for bridge0 access from Cortex.app per Path A — TODO pf rules
-      - 0.0.0.0:6334:6334  # was 127.0.0.1, gRPC sibling of 6333
+  # qdrant override RETIRED 2026-04-19 (Brief 8b) — base service removed.
 
   # DISABLED 2026-03-28: Mac Mini is production Neo4j target
   # neo4j:

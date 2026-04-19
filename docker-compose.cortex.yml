@@ -32,32 +32,10 @@
 services:
 
   # ── Neo4j Cortex (primary knowledge graph) ─────────────────────────
-  # Heap/page-cache sized for Desk's 16 GB ceiling alongside the rest of
-  # the localai stack. Bump if Desk gets a RAM upgrade.
-  neo4j-cortex:
-    image: neo4j:5-community
-    container_name: cortex-neo4j-cortex
-    ports:
-      - "7474:7474"
-      - "7687:7687"
-    environment:
-      - NEO4J_AUTH=neo4j/${NEO4J_CORTEX_PASSWORD:-cortex-desk}
-      - NEO4J_PLUGINS=["apoc"]
-      - NEO4J_server_memory_heap_initial__size=512m
-      - NEO4J_server_memory_heap_max__size=1g
-      - NEO4J_server_memory_pagecache_size=512m
-      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
-      - NEO4J_dbms_security_procedures_allowlist=apoc.*
-    volumes:
-      - neo4j-cortex-data:/data
-      - neo4j-cortex-logs:/logs
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7474/"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+  # ── neo4j-cortex RETIRED 2026-04-19 (Brief 8b) ────────────────────────
+  # Service definition removed. Cortex Swift client + vault-api graceful-
+  # degrade path landed during 9l-first arc + Brief 8a. Volume `neo4j-cortex-data`
+  # preserved on disk for rollback (declared at bottom of file).
 
   # ── vault-api (FastAPI gateway) ────────────────────────────────────
   # Build context is the Cortex repo's vault-api/ directory. The relative
@@ -73,10 +51,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      - VAULT_NEO4J_URI=bolt://neo4j-cortex:7687
-      - VAULT_NEO4J_USER=neo4j
-      - VAULT_NEO4J_PASSWORD=${NEO4J_CORTEX_PASSWORD:-cortex-desk}
-      - VAULT_QDRANT_URL=http://qdrant:6333
+      # VAULT_NEO4J_URI / VAULT_NEO4J_PASSWORD / VAULT_QDRANT_URL retired
+      # 2026-04-19 (Brief 8b). vault-api graceful-degrades when unset.
       # ollama lives on Brain, reachable via the Thunderbolt bridge IP.
       # OrbStack containers cannot bind to host bridge IPs, but they CAN
       # reach them outbound — so this URL works from inside the container.
@@ -88,11 +64,7 @@ services:
       # CORS: lock to the Thunderbolt subnet + localhost. Override via env
       # if a browser on a non-bridge interface needs access.
       - VAULT_CORS_ORIGINS=http://10.0.0.1,http://10.0.0.2,http://10.0.0.3,http://localhost
-    depends_on:
-      neo4j-cortex:
-        condition: service_healthy
-      qdrant:
-        condition: service_started
+    # depends_on neo4j-cortex + qdrant retired 2026-04-19 (Brief 8b).
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -101,6 +73,7 @@ services:
       retries: 3
       start_period: 10s
 
+# RETIRED 2026-04-19 — Brief 8b teardown. Volumes preserved for rollback.
 volumes:
   neo4j-cortex-data:
   neo4j-cortex-logs:
