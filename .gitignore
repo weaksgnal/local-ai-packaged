@@ -6,3 +6,6 @@ shared-backup/
 .env.test
 searxng/settings.yml
 searxng/uwsgi*
+# 963MB open-webui volume dumps — never commit
+backups/
+*.bak-*

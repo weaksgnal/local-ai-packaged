@@ -2,6 +2,15 @@ services:
   open-webui:
     ports:
       - 127.0.0.1:8080:8080
+    environment:
+      # 2026-09-13: the base image ships OLLAMA_BASE_URL=/ollama, which is the
+      # frontend proxy path, not a backend upstream — so no Ollama host was
+      # actually configured. Point the backend at both reachable daemons:
+      # Brain over Thunderbolt (10.0.0.1, holds gemma4:26b, granite4.1:8b,
+      # muse-glimmer:30b, huihui_ai/Qwen3.8-abliterated:27b, mxbai-embed-large)
+      # and the Desk's own Ollama via host-gateway (holds gemma4:26b-mlx).
+      # Never hardcode elsewhere — 10.0.0.1 is BRAIN_IP from cgts_config.py.
+      - OLLAMA_BASE_URLS=http://10.0.0.1:11434;http://host.docker.internal:11434
 
   n8n:
     ports:
