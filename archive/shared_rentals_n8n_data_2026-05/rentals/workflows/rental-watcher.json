@@ -1,0 +1,555 @@
+{
+  "id": "CoTu9CUDLY7b4gmj",
+  "name": "rental-watcher",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Daily 08:30 ET",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1400,
+        0
+      ],
+      "notes": "Cron interpreted in n8n's GENERIC_TIMEZONE. Make sure n8n is set to America/Toronto. 08:30 lands inside the Mac Mini Gemma window (07-22)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the list of feeds to fetch.\n// Two source types:\n//   - kijiji / kijiji-house: r.jina.ai-fetched markdown from Kijiji category pages\n//   - searxng-fb: SearXNG meta-search query that returns indexed FB Marketplace\n//                 listings via Google/DuckDuckGo (rich snippets, no FB login needed)\n//\n// The Jina/Fetch HTTP node downstream uses item.json.fetch_url, which is\n// pre-built here so the HTTP node stays source-agnostic.\n\nconst kijijiFeeds = [\n  // Kijiji long-term rentals by neighborhood\n  { source: 'kijiji', neighborhood: 'rosemont',       kijiji_url: 'https://www.kijiji.ca/b-appartement-condo/grand-montreal/rosemont/k0c37l80002' },\n  { source: 'kijiji', neighborhood: 'mile-end',       kijiji_url: 'https://www.kijiji.ca/b-appartement-condo/grand-montreal/mile-end/k0c37l80002' },\n  { source: 'kijiji', neighborhood: 'plateau',        kijiji_url: 'https://www.kijiji.ca/b-appartement-condo/grand-montreal/plateau-mont-royal/k0c37l80002' },\n  { source: 'kijiji', neighborhood: 'villeray',       kijiji_url: 'https://www.kijiji.ca/b-appartement-condo/grand-montreal/villeray/k0c37l80002' },\n  { source: 'kijiji', neighborhood: 'petite-italie',  kijiji_url: 'https://www.kijiji.ca/b-appartement-condo/grand-montreal/petite-italie/k0c37l80002' },\n  { source: 'kijiji', neighborhood: 'outremont',      kijiji_url: 'https://www.kijiji.ca/b-appartement-condo/grand-montreal/outremont/k0c37l80002' },\n  // FIXED 2026-04-09: c43l1700281 was a dead category code, c34 (real estate) works\n  { source: 'kijiji-house', neighborhood: 'maison-louer-mtl', kijiji_url: 'https://www.kijiji.ca/b-real-estate/grand-montreal/maison-a-louer/k0c34l80002' },\n  // Bungalow keyword feed — mostly suburb noise that the location_reject filter drops,\n  // but catches the rare in-zone bungalow when one appears (peak listings: mid-May for July 1)\n  { source: 'kijiji-house', neighborhood: 'bungalow-mtl', kijiji_url: 'https://www.kijiji.ca/b-real-estate/grand-montreal/bungalow/k0c34l80002' },\n];\n\n// SearXNG meta-search for FB Marketplace listings via Google/DuckDuckGo index.\n// Each query returns ~10 results with rich snippets (title + URL + 200-400 char\n// content). No FB login required because we never touch facebook.com directly.\n// Trade-off: search-engine index lag means brand-new listings appear here days\n// to weeks AFTER they hit Kijiji. Use both feeds together for best coverage.\n// Reduced from 7 to 3 queries because SearXNG queries to Google/DuckDuckGo\n// get rate-limited when fired in rapid succession (only the first 1-2 return\n// data, the rest return empty envelopes). 3 queries is the empirical sweet spot.\nconst searxngQueries = [\n  { neighborhood: 'rosemont',         query: 'site:facebook.com/marketplace montreal rosemont property rentals' },\n  { neighborhood: 'mile-end',         query: 'site:facebook.com/marketplace montreal \"mile end\" property rentals' },\n  { neighborhood: 'rosemont-maison',  query: 'site:facebook.com/marketplace montreal maison louer rosemont' },\n];\n\nconst feeds = [];\n\nfor (const f of kijijiFeeds) {\n  feeds.push({\n    source: f.source,\n    neighborhood: f.neighborhood,\n    url: f.kijiji_url,\n    fetch_url: 'https://r.jina.ai/' + f.kijiji_url,\n  });\n}\n\nfor (const f of searxngQueries) {\n  feeds.push({\n    source: 'searxng-fb',\n    neighborhood: f.neighborhood,\n    // synthetic url for dedup tracking — not a real fetch target\n    url: 'searxng-fb://' + encodeURIComponent(f.query),\n    query: f.query,\n    fetch_url: 'http://searxng:8080/search?q=' + encodeURIComponent(f.query) + '&format=json',\n  });\n}\n\nreturn feeds.map(f => ({ json: f }));\n"
+      },
+      "id": "build-feeds",
+      "name": "Build Feed List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-feeds",
+      "name": "For Each Feed",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.fetch_url }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "jina-fetch",
+      "name": "Jina Reader",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -800,
+        0
+      ],
+      "continueOnFail": true,
+      "notes": "Free hosted reader. Returns clean markdown with JS rendering. No auth, generous rate limit. continueOnFail catches DNS/connect errors (neverError only catches HTTP status codes)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse fetched feed bodies into normalized listing objects.\n// Dispatches on source pulled from Build Feed List by index (the Jina Reader\n// HTTP node strips the original feed metadata from item.json, so we have to\n// recover it from the upstream node by position).\n\nconst fetchedBodies = $input.all();           // outputs from Jina Reader (one per feed)\nconst feedItems = $('Build Feed List').all(); // original feeds with source/url/query\n\nconst out = [];\n\nconst WORD_NUMS_EN = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };\nconst WORD_NUMS_FR = { un: 1, une: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, six: 6, sept: 7, huit: 8 };\n\nfunction parseBedsFromText(text) {\n  if (!text) return null;\n  const found = [];\n  for (const m of text.matchAll(/(\\d+)\\s*[-\\s]?\\s*(?:bed(?:room)?s?|br)\\b/gi)) found.push(parseInt(m[1], 10));\n  for (const m of text.matchAll(/(\\d+)\\s*chambres?\\b/gi)) found.push(parseInt(m[1], 10));\n  for (const m of text.matchAll(/\\b(one|two|three|four|five|six|seven|eight)[-\\s]+(?:bed|br)/gi)) found.push(WORD_NUMS_EN[m[1].toLowerCase()]);\n  for (const m of text.matchAll(/\\b(un|une|deux|trois|quatre|cinq|six|sept|huit)\\s+chambres?/gi)) found.push(WORD_NUMS_FR[m[1].toLowerCase()]);\n  for (const m of text.matchAll(/(\\d+)(?:[-\\s]*(?:1\\/2|½|⅟)|\\s*et\\s*(?:demi|1\\/2|½))/gi)) {\n    const r = parseInt(m[1], 10);\n    if (!isNaN(r)) found.push(Math.max(0, r - 2));\n  }\n  if (found.length === 0) return null;\n  return Math.max(...found);\n}\n\nfunction parseBathsFromText(text) {\n  if (!text) return null;\n  const found = [];\n  for (const m of text.matchAll(/(\\d+(?:[.,]\\d+)?)\\s*(?:bath(?:room)?s?|sdb|salle\\s*de\\s*bain)/gi)) {\n    found.push(parseFloat(m[1].replace(',', '.')));\n  }\n  if (found.length === 0) return null;\n  return Math.max(...found);\n}\n\nfunction parsePriceFromText(text) {\n  if (!text) return null;\n  const candidates = [];\n  for (const m of text.matchAll(/\\$?\\s*(\\d{1,2}[,\\s.]?\\d{3})(?:[.,]\\d{2})?\\s*(?:\\$|\\/?\\s*mois|\\/?\\s*mo|per\\s*month)/gi)) {\n    const n = parseFloat(m[1].replace(/[,\\s.]/g, ''));\n    if (n >= 500 && n <= 10000) candidates.push(n);\n  }\n  for (const m of text.matchAll(/\\$\\s*(\\d{1,2}[,\\s.]?\\d{3})(?:[.,]\\d{2})?/g)) {\n    const n = parseFloat(m[1].replace(/[,\\s.]/g, ''));\n    if (n >= 500 && n <= 10000) candidates.push(n);\n  }\n  if (candidates.length === 0) return null;\n  return Math.min(...candidates);\n}\n\nfunction detectLocationFromText(text) {\n  if (!text) return '';\n  const hoods = [\n    ['Rue Masson', 'Rue Masson, Rosemont'],\n    ['Vieux Rosemont', 'Vieux Rosemont, Montréal'],\n    ['Old Rosemont', 'Old Rosemont, Montréal'],\n    ['Petite-Patrie', 'Petite-Patrie, Montréal'],\n    ['Petite Patrie', 'Petite-Patrie, Montréal'],\n    ['Rosemont', 'Rosemont, Montréal'],\n    ['Mile End', 'Mile End, Montréal'],\n    ['Mile-End', 'Mile End, Montréal'],\n    ['Plateau', 'Plateau, Montréal'],\n    ['Villeray', 'Villeray, Montréal'],\n    ['Outremont', 'Outremont, Montréal'],\n    ['Petite Italie', 'Petite Italie, Montréal'],\n    ['Little Italy', 'Little Italy, Montréal'],\n    ['Parc-Extension', 'Parc-Extension, Montréal'],\n    ['Jarry Park', 'Jarry Park, Montréal'],\n    ['De Lorimier', 'De Lorimier, Montréal'],\n    ['Maisonneuve Park', 'Maisonneuve Park, Montréal'],\n  ];\n  const lower = text.toLowerCase();\n  for (const [needle, label] of hoods) {\n    if (lower.includes(needle.toLowerCase())) return label;\n  }\n  return '';\n}\n\n// Iterate fetched bodies, look up source by index\nfor (let i = 0; i < fetchedBodies.length; i++) {\n  const fetchedItem = fetchedBodies[i];\n  // Recover the original feed metadata by position\n  const feedItem = feedItems[i] ? feedItems[i].json : {};\n  const source = feedItem.source || 'kijiji';\n  const feedHood = feedItem.neighborhood || '';\n\n  // ---------- SearXNG → FB Marketplace branch ----------\n  if (source === 'searxng-fb') {\n    const raw = fetchedItem.json.data || fetchedItem.json.body || fetchedItem.json;\n    let parsed;\n    try {\n      parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;\n    } catch (e) { continue; }\n    const results = parsed && parsed.results ? parsed.results : [];\n\n    for (const r of results) {\n      const url = r.url || '';\n      if (!/facebook\\.com\\/marketplace\\/item\\//.test(url)) continue;\n\n      const titleRaw = r.title || '';\n      if (/for\\s*sale/i.test(titleRaw) || /à\\s*vendre/i.test(titleRaw)) continue;\n      const content = r.content || '';\n      if (/\\$\\s*\\d{3}[,\\s.]\\d{3}/.test(titleRaw + ' ' + content)) continue;\n\n      const title = titleRaw\n        .replace(/\\s*-\\s*Property Rentals.*$/i, '')\n        .replace(/\\s*\\|\\s*Facebook.*$/i, '')\n        .replace(/\\s*-\\s*Montreal,?\\s*Quebec.*$/i, '')\n        .trim();\n\n      const corpus = title + ' ' + content;\n      const beds = parseBedsFromText(corpus);\n      const baths = parseBathsFromText(corpus);\n      const price = parsePriceFromText(corpus);\n      const location = detectLocationFromText(corpus);\n\n      out.push({\n        json: {\n          source: 'searxng-fb',\n          feed_neighborhood: feedHood,\n          title,\n          url,\n          image_url: null,\n          price,\n          beds,\n          baths,\n          sqft: null,\n          property_type: null,\n          location,\n          description: content.slice(0, 400),\n          description_full: content.slice(0, 1500),\n          days_ago: null,\n          fetched_at: new Date().toISOString(),\n        }\n      });\n    }\n    continue;\n  }\n\n  // ---------- Kijiji markdown branch ----------\n  const md = fetchedItem.json.data || fetchedItem.json.body || fetchedItem.json;\n  const text = typeof md === 'string' ? md : JSON.stringify(md);\n\n  const cardRe = /### \\[(.+?)\\]\\((https?:\\/\\/[^)]+)\\)([\\s\\S]*?)(?=### \\[|$)/g;\n  let m;\n  while ((m = cardRe.exec(text)) !== null) {\n    const title = m[1].replace(/\\*\\*/g, '').trim();\n    const url = m[2].split('?')[0];\n    const body = m[3];\n\n    if (!/kijiji\\.ca\\/v-/.test(url)) continue;\n\n    const before = text.slice(Math.max(0, m.index - 600), m.index);\n    const imgMatches = [...before.matchAll(/!\\[Image \\d+:[^\\]]*\\]\\((https?:\\/\\/[^)]+)\\)/g)];\n    const image_url = imgMatches.length ? imgMatches[imgMatches.length - 1][1] : null;\n    const priceM = [...before.matchAll(/\\$([\\d,]+(?:\\.\\d{2})?)/g)].pop();\n    const price = priceM ? parseFloat(priceM[1].replace(/,/g, '')) : null;\n\n    const daysM = body.match(/(\\d+)\\s*d(?:\\s|$)/);\n    const daysAgo = daysM ? parseInt(daysM[1], 10) : null;\n\n    const lines = body.split('\\n');\n    const bullets = [];\n    for (const line of lines) {\n      const bm = line.match(/^\\s*\\*\\s+(.+)$/);\n      if (bm) bullets.push(bm[1].replace(/\\*\\*/g, '').trim());\n    }\n    const uniqueBullets = [];\n    for (const b of bullets) {\n      if (uniqueBullets[uniqueBullets.length - 1] !== b) uniqueBullets.push(b);\n    }\n\n    let beds = null, baths = null, propType = null, sqft = null;\n    if (uniqueBullets.length >= 5) {\n      const num0 = parseInt(uniqueBullets[0], 10);\n      const num1 = parseFloat(uniqueBullets[1].replace(',', '.'));\n      if (!isNaN(num0) && num0 < 20) beds = num0;\n      if (!isNaN(num1) && num1 < 20) baths = num1;\n      propType = uniqueBullets[2] || null;\n      const sqftM = uniqueBullets[4] && uniqueBullets[4].match(/(\\d+)\\s*sqft/i);\n      if (sqftM) sqft = parseInt(sqftM[1], 10);\n    }\n\n    const proseLines = lines.filter(l => !/^\\s*\\*\\s+/.test(l));\n    const prose = proseLines.join('\\n').replace(/\\*\\*/g, '').replace(/\\s+/g, ' ').trim();\n    const description = prose.slice(0, 1500);\n\n    if (beds === null) beds = parseBedsFromText(title + ' ' + description);\n    if (baths === null) baths = parseBathsFromText(title + ' ' + description);\n\n    const locM = body.match(/\\n([^\\n•]+),\\s*([^\\n•]+)\\n[\\s\\S]*?•/);\n    const location = locM ? `${locM[1].trim()}, ${locM[2].trim()}` : '';\n\n    if (price === null) continue;\n\n    out.push({\n      json: {\n        source,\n        feed_neighborhood: feedHood,\n        title,\n        url,\n        image_url,\n        price,\n        beds,\n        baths,\n        sqft,\n        property_type: propType,\n        location,\n        description: description.slice(0, 400),\n        description_full: description,\n        days_ago: daysAgo,\n        fetched_at: new Date().toISOString(),\n      }\n    });\n  }\n}\n\nreturn out;\n"
+      },
+      "id": "parse-kijiji",
+      "name": "Parse Kijiji Cards",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/data/shared/rentals/seen.json",
+        "options": {}
+      },
+      "id": "read-seen",
+      "name": "Read seen.json",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -1200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/data/shared/rentals/preferences.json",
+        "options": {}
+      },
+      "id": "read-prefs",
+      "name": "Read preferences.json",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -1000,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dedup + hard filter.\n// Reads preferences.json and seen.json directly from disk via fs because\n// n8n's binary-data-via-base64-decode trick is unreliable in 2.x and was\n// silently returning null for the entire day, which made the location_reject\n// list never fire. Direct fs read is bulletproof — container has\n// NODE_FUNCTION_ALLOW_BUILTIN=* so require('fs') works.\n\nconst fs = require('fs');\n\nconst PREFS_PATH = '/data/shared/rentals/preferences.json';\nconst SEEN_PATH  = '/data/shared/rentals/seen.json';\n\nlet prefs;\ntry {\n  prefs = JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8'));\n} catch (e) {\n  // Fallback to safe defaults if the file is missing/corrupt\n  prefs = {\n    max_price: 3200, ideal_price: 2800,\n    min_bedrooms: 3, min_bathrooms: 1.5,\n    location_allow: [], location_reject: [],\n    likes: [], dislikes: []\n  };\n}\n\nlet seen;\ntry {\n  seen = JSON.parse(fs.readFileSync(SEEN_PATH, 'utf8'));\n} catch (e) {\n  seen = { urls: {} };\n}\nif (!seen.urls) seen.urls = {};\n\nconst rejectList = (prefs.location_reject || []).map(s => s.toLowerCase());\n\nfunction isSingleRoomRental(title) {\n  const t = (title || '').toLowerCase().trim();\n  if (/^chambre\\b/.test(t) && !/^chambres\\b/.test(t)) return true;\n  if (/\\broom\\s+(for\\s+rent|available|wanted)\\b/.test(t)) return true;\n  if (/\\b(roommate|colocataire|colocation)\\b/.test(t)) return true;\n  if (/\\bsublet\\s+room\\b/.test(t)) return true;\n  return false;\n}\n\nfunction locationVerdict(listing) {\n  const corpus = [\n    listing.location || '',\n    listing.title || '',\n    listing.url || '',\n    listing.description_full || ''\n  ].join(' ').toLowerCase();\n  for (const bad of rejectList) {\n    if (bad && corpus.includes(bad)) return { ok: false, reason: 'loc_reject:' + bad };\n  }\n  return { ok: true };\n}\n\nconst listings = $input.all().map(it => it.json).filter(j => j && j.url && j.price !== undefined);\nconst total = listings.length;\nconst newOnes = listings.filter(l => !seen.urls[l.url]);\n\nconst skipped = { price: 0, beds: 0, location: 0, single_room: 0 };\nconst filtered = [];\nfor (const l of newOnes) {\n  if (l.price == null || l.price > prefs.max_price) { skipped.price++; continue; }\n  if (l.beds != null && l.beds < prefs.min_bedrooms) { skipped.beds++; continue; }\n  if (isSingleRoomRental(l.title)) { skipped.single_room++; continue; }\n  const lv = locationVerdict(l);\n  if (!lv.ok) { skipped.location++; continue; }\n  filtered.push(l);\n}\n\nconst staticData = $getWorkflowStaticData('node');\nstaticData.prefs = prefs;\nstaticData.runSummary = {\n  total_today: total,\n  new_count: newOnes.length,\n  filtered_count: filtered.length,\n  skipped,\n  prefs_loaded_from: PREFS_PATH,\n  reject_terms_loaded: rejectList.length,\n  run_at: new Date().toISOString()\n};\nstaticData.priorSeen = seen;\n\nreturn filtered.map(l => ({ json: l }));\n"
+      },
+      "id": "dedup-filter",
+      "name": "Dedup + Hard Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build per-listing prompts for Gemma scoring.\n// Pulls prefs from workflow static data set by 'Dedup + Hard Filter'.\n\nconst items = $input.all();\nconst staticData = $getWorkflowStaticData('node');\nconst prefs = staticData.prefs || { likes: [], dislikes: [] };\n\nconst sysPreamble = [\n  'You are scoring a Montreal rental listing for a couple looking to live in Rosemont-La Petite-Patrie as their PRIMARY target neighborhood, with easy access to Mile End where Rebecca spends time.',\n  '',\n  'Hard requirements: 3+ bedrooms (counting dens/offices as bedrooms — typically listed as a \"3 bedroom\" or Quebec \"5 1/2\"). Max budget $3200/mo, ideal $2800/mo. Min 1.5 baths preferred but not required.',\n  '',\n  'They strongly prefer:',\n  '- A house, semi-detached, bungalow, duplex, or triplex unit (NOT a small condo or modern build)',\n  '- The Rue Masson strip in Rosemont — top target zone',\n  '- The Maisonneuve Park / east Rosemont area — bonus for green space',\n  '- The Beaubien metro corridor / Petite-Patrie border',\n  '- 2-car parking ideal, 1-car or laneway parking acceptable',\n  '- Backyard, basement, or terrace',\n  '- Cafe / shop / farmers-market neighborhoods (the Mile End vibe in a quieter form)',\n  '',\n  'Sub-neighborhood ranking (highest to lowest preference):',\n  '- Rue Masson area, Rosemont east, Vieux Rosemont (top)',\n  '- Petite-Patrie, Beaubien strip',\n  '- Mile End (Rebecca\\'s favorite)',\n  '- Plateau Mont-Royal, De Lorimier',\n  '- Villeray, Jarry Park metro area',\n  '- Outremont, Petite Italie, Little Italy, Parc-Extension',\n  '- CDN-Outremont border (only Avenue Kent / UdeM area)',\n  '',\n  'Avoid: south shore (Longueuil, St-Hubert, Brossard), Laval, west island, far east Montreal, Verdun, NDG west of Vendôme.',\n  '',\n  'Score 0-100. 90+ for an ideal Rue Masson bungalow with backyard at $2,500. 75-90 for a strong 5 1/2 in Rosemont/Mile End/Plateau/Villeray with backyard or parking. 60-75 for a reasonable in-zone listing meeting basic criteria. 40-60 for borderline (CDN border, missing amenities, less ideal sub-zone). Below 40 for marginal cases that should still be ranked but low.'\n].join('\\n');\n\nconst out = [];\nfor (const it of items) {\n  const l = it.json;\n  const prompt =\n    sysPreamble + '\\n\\n' +\n    'PREFERENCES (learned from past feedback):\\n' +\n    'Likes: ' + JSON.stringify(prefs.likes || []) + '\\n' +\n    'Dislikes: ' + JSON.stringify(prefs.dislikes || []) + '\\n\\n' +\n    'LISTING:\\n' +\n    'Source: ' + (l.source || 'kijiji') + '\\n' +\n    'Title: ' + (l.title || '') + '\\n' +\n    'Price: $' + (l.price ?? '?') + '/mo\\n' +\n    'Beds: ' + (l.beds ?? '?') + ', Baths: ' + (l.baths ?? '?') + ', Sqft: ' + (l.sqft ?? '?') + ', Type: ' + (l.property_type ?? '?') + '\\n' +\n    'Location: ' + (l.location || '?') + '\\n' +\n    'Description: ' + (l.description_full || l.description || '(none)') + '\\n\\n' +\n    'IMPORTANT: Every string value you return MUST be in ENGLISH. If the listing is in French, translate it. Do NOT include any French in the output, not even as a prefix like \"English below\". '+\n    'Return JSON with keys: score (integer 0-100), verdict (one short sentence in ENGLISH), highlights (array of short ENGLISH strings), concerns (array of short ENGLISH strings), title_en (the listing title translated to natural English; if already English, return it unchanged), description_en (the listing description translated to natural English, preserving concrete details like rooms, amenities, street names; if already English, return it unchanged; keep under 500 characters).';\n\n  out.push({ json: { ...l, prompt } });\n}\nreturn out;\n"
+      },
+      "id": "build-prompt",
+      "name": "Build Gemma Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.0.0.1:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"qwen3:14b\",\n  \"stream\": false,\n  \"think\": false,\n  \"format\": \"json\",\n  \"options\": { \"temperature\": 0.2, \"num_predict\": 800 },\n  \"prompt\": {{ JSON.stringify($json.prompt) }}\n}",
+        "options": {
+          "timeout": 300000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 100
+            }
+          }
+        }
+      },
+      "id": "gemma-score",
+      "name": "Gemma Score (per listing)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        100
+      ],
+      "notes": "Calls Mac Mini Ollama at 10.0.0.1:11434 (Thunderbolt bridge). Uses qwen3:14b with think:false (qwen3 reasoning mode returns empty {} under format:json; think:false fixes it). Replaces retired gemma4:e4b. neverError=true so a Gemma timeout doesn't kill the run — the next node falls back to heuristic-only for any item missing an LLM response.",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge Gemma's response back into each listing item.\n// HTTP Request node replaces the item with the response, so we walk back via\n// $('Build Gemma Prompt').all() which still has the listing data + prompt.\n// Order is preserved by n8n's executionOrder=v1, so index alignment is safe.\n\nconst gemmaItems = $input.all();\nconst listings = $('Build Gemma Prompt').all();\n\nconst out = [];\nfor (let i = 0; i < listings.length; i++) {\n  // Drop the prompt field from the listing — it was only used for the API call\n  const { prompt, ...listing } = listings[i].json;\n  const gemmaResp = gemmaItems[i]?.json;\n\n  let llm = null;\n  try {\n    if (gemmaResp && gemmaResp.response) {\n      llm = JSON.parse(gemmaResp.response);\n    }\n  } catch (e) {\n    llm = null;\n  }\n\n  listing.llm = llm;\n  listing.llm_score = llm?.score ?? null;\n  out.push({ json: listing });\n}\n\nreturn out;"
+      },
+      "id": "merge-llm",
+      "name": "Merge LLM into listing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Final ranker: combine heuristic score + Gemma score, sort, assign L# tags, format email.\n\nconst items = $input.all();\nconst staticData = $getWorkflowStaticData('node');\nconst prefs = staticData.prefs || { max_price: 3500, ideal_price: 2800, min_bedrooms: 3, min_bathrooms: 1.5, soft_signals: {}, neighborhood_weights: {}, likes: [], dislikes: [] };\nconst run = staticData.runSummary || { total_today: 0, new_count: 0, filtered_count: 0, run_at: new Date().toISOString() };\n\nfunction heuristicScore(l, prefs) {\n  let score = 0;\n  const reasons = [];\n  if (l.price <= prefs.ideal_price) {\n    score += 50;\n    reasons.push(`price≤ideal (+50)`);\n  } else {\n    const room = prefs.max_price - prefs.ideal_price;\n    const overshoot = l.price - prefs.ideal_price;\n    const ps = Math.max(0, 50 * (1 - overshoot / room));\n    score += ps;\n    reasons.push(`price ${l.price} (+${ps.toFixed(1)})`);\n  }\n  if (l.beds != null && l.beds > prefs.min_bedrooms) {\n    score += 5 * (l.beds - prefs.min_bedrooms);\n  }\n  if (l.baths != null && l.baths >= prefs.min_bathrooms) score += 5;\n  const haystack = `${l.title} ${l.description}`.toLowerCase();\n  const sig = {\n    garage_or_parking: /garage|stationnement|parking/i,\n    basement: /sous-sol|basement|sous sol/i,\n    backyard: /cour|backyard|terrasse|jardin priv|yard/i,\n    ground_floor: /rez-de-chauss|ground floor|rdc|rdj/i,\n    renovated: /r[ée]nov[ée]|renovated|refait/i,\n    near_park: /parc |park |botaniqu|maisonneuve|lafontaine|laurier/i,\n    near_market: /jean-talon|atwater|march[ée]/i,\n    cafe_neighborhood: /caf[ée]|restaurant|boutique|shops/i,\n    metro_walk: /m[ée]tro|metro|station/i,\n  };\n  for (const [k, re] of Object.entries(sig)) {\n    if (re.test(haystack)) {\n      const w = (prefs.soft_signals && prefs.soft_signals[k]) || 1;\n      score += 5 * w;\n    }\n  }\n  if (prefs.neighborhood_weights) {\n    for (const [hood, weight] of Object.entries(prefs.neighborhood_weights)) {\n      if (haystack.includes(hood) || (l.location || '').toLowerCase().includes(hood)) {\n        score += 10 * weight;\n        break;\n      }\n    }\n  }\n  for (const like of (prefs.likes || [])) {\n    if (haystack.includes(String(like).toLowerCase())) score += 8;\n  }\n  for (const dis of (prefs.dislikes || [])) {\n    if (haystack.includes(String(dis).toLowerCase())) score -= 12;\n  }\n  return Math.round(score * 10) / 10;\n}\n\n// Combine: 60% LLM (when available) + 40% heuristic. If LLM missing, 100% heuristic.\nconst scored = items.map(it => {\n  const l = { ...it.json };\n  const heur = heuristicScore(l, prefs);\n  l.heuristic_score = heur;\n  if (l.llm_score != null) {\n    l.final_score = Math.round(0.6 * l.llm_score + 0.4 * heur);\n  } else {\n    l.final_score = Math.round(heur);\n  }\n  return l;\n});\n\nscored.sort((a, b) => b.final_score - a.final_score);\nscored.forEach((l, i) => { l.tag = `L${i + 1}`; });\n\n// French-leak guard: qwen3 occasionally copies French prose verbatim.\n// Used below to drop title/description when common French words appear.\nconst frenchRe = /\\b(chambres?|appartement|cuisine|rénové|pi[èe]ces?|sous-sol|salle\\s+de\\s+bain|maison|disponible|à\\s+louer|jardin|é?lectrom[eé]nagers|pi[èe]ds?|idealement)\\b/i;\n\nconst today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });\n\nif (scored.length === 0) {\n  return [{ json: {\n    subject: `🏠 Rental Watcher — nothing new — ${today}`,\n    body_html: `<p><em>Scanned ${run.total_today} listings, ${run.new_count} new, 0 matched filters today.</em></p><p>Filters: ≥3 BR, ≤ \\$3500/mo, in target neighborhoods.</p>`,\n    send: false,\n    new_urls: []\n  } }];\n}\n\n// Build HTML email body with images\nlet html = '';\nhtml += `<div style=\"font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;color:#222\">`;\nhtml += `<h1 style=\"font-size:22px;margin:0 0 4px 0\">🏠 ${scored.length} new rental match${scored.length === 1 ? '' : 'es'} — ${today}</h1>`;\nhtml += `<p style=\"color:#666;font-size:13px;margin:0 0 18px 0\">Scanned ${run.total_today} listings · ${run.new_count} new · ${scored.length} passed filters. Reply with thumbs to train tomorrow's ranking — e.g. <code>L2 👍</code> or <code>L4 👎 too far from metro</code>.</p>`;\nhtml += `<hr style=\"border:none;border-top:1px solid #eee;margin:0 0 20px 0\">`;\n\nfor (const l of scored) {\n  const beds = l.beds != null ? `${l.beds} BR` : '? BR';\n  const baths = l.baths != null ? ` · ${l.baths} bath` : '';\n  const sqft = l.sqft != null ? ` · ${l.sqft} sqft` : '';\n  const days = l.days_ago != null ? ` · ${l.days_ago}d ago` : '';\n  const ptype = l.property_type ? ` · ${l.property_type}` : '';\n\n  html += `<div style=\"margin-bottom:32px;padding-bottom:20px;border-bottom:1px solid #eee\">`;\n  html += `<div style=\"display:flex;align-items:baseline;gap:10px;margin-bottom:6px\">`;\n  html += `<span style=\"background:#f0f0f0;color:#333;padding:2px 8px;border-radius:4px;font-weight:600;font-size:13px\">${l.tag}</span>`;\n  html += `<span style=\"font-size:20px;font-weight:700;color:#0a0\">$${l.price.toLocaleString()}/mo</span>`;\n  html += `<span style=\"color:#888;font-size:13px\">score ${l.final_score}${l.llm_score != null ? ` (LLM ${l.llm_score})` : ''}</span>`;\n  html += `</div>`;\n  html += `<h2 style=\"font-size:17px;margin:4px 0 6px 0;font-weight:600\"><a href=\"${l.url}\" style=\"color:#0066cc;text-decoration:none\">${((l.llm && l.llm.title_en && !frenchRe.test(l.llm.title_en)) ? l.llm.title_en : (l.title && !frenchRe.test(l.title)) ? l.title : \"(see listing →)\")}</a></h2>`;\n  html += `<div style=\"color:#555;font-size:13px;margin-bottom:10px\"><strong>${beds}${baths}${sqft}${ptype}</strong>${days}${l.location ? ' · 📍 ' + l.location : ''}</div>`;\n\n  if (l.image_url) {\n    html += `<a href=\"${l.url}\"><img src=\"${l.image_url}\" alt=\"${l.title}\" style=\"max-width:100%;border-radius:6px;margin-bottom:10px;display:block\" /></a>`;\n  }\n\n  if (l.llm && l.llm.verdict) {\n    html += `<p style=\"font-size:14px;font-style:italic;color:#444;margin:6px 0 8px 0\">💬 ${l.llm.verdict}</p>`;\n  }\n  if (l.llm && l.llm.highlights && l.llm.highlights.length) {\n    html += `<div style=\"font-size:13px;margin:6px 0\"><strong style=\"color:#0a0\">+</strong> ${l.llm.highlights.join(' · ')}</div>`;\n  }\n  if (l.llm && l.llm.concerns && l.llm.concerns.length) {\n    html += `<div style=\"font-size:13px;margin:6px 0\"><strong style=\"color:#c33\">−</strong> ${l.llm.concerns.join(' · ')}</div>`;\n  }\n  const descEn = (l.llm && l.llm.description_en) ? l.llm.description_en : null;\n  if (descEn && !frenchRe.test(descEn)) {\n    html += `<p style=\"font-size:13px;color:#666;margin:8px 0 0 0\">${descEn.replace(/</g, '&lt;')}</p>`;\n  }\n  html += `<p style=\"font-size:12px;margin:10px 0 0 0\"><a href=\"${l.url}\" style=\"color:#0066cc\">${l.url}</a></p>`;\n  html += `</div>`;\n}\n\nhtml += `<p style=\"font-size:11px;color:#999;margin-top:20px\">Sources: Kijiji category pages via r.jina.ai. LLM: qwen3:14b on brains-mac-mini. State: ~/local-ai/shared/rentals/</p>`;\nhtml += `</div>`;\n\n// Build sent-mapping for tomorrow's feedback ingest: L# -> {url, title, description, price}\nconst sentMapping = {};\nfor (const l of scored) {\n  sentMapping[l.tag] = {\n    url: l.url,\n    title: l.title,\n    description: l.description,\n    price: l.price,\n    beds: l.beds,\n    location: l.location,\n  };\n}\n\nreturn [{ json: {\n  subject: `🏠 Rental Watcher — ${scored.length} new — ${today}`,\n  body_html: html,\n  send: true,\n  new_urls: scored.map(l => l.url),\n  sent_date: today,\n  sent_mapping: sentMapping,\n} }];"
+      },
+      "id": "rank-format",
+      "name": "Combine, Rank, Format Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "send-cond",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.send }}",
+              "rightValue": ""
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-send",
+      "name": "Has new listings?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        800,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "ianjarthur@gmail.com",
+        "toEmail": "ianjarthur@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.body_html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "gmail-send",
+      "name": "SMTP: send summary",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1000,
+        0
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "MEpDbPrKj0Pqnwn9",
+          "name": "Personal Gmail SMTP"
+        }
+      },
+      "webhookId": "c305ff5c-39a7-4e99-bf4a-cda1ed7912d3"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Update seen.json: merge today's URLs in, prune anything older than 60 days.\n// Reads prior seen state from workflow static data (set by Dedup + Hard Filter).\n\nconst items = $input.all();\nconst staticData = $getWorkflowStaticData('node');\nconst prior = staticData.priorSeen || { urls: {} };\n\nconst newUrls = (items[0]?.json?.new_urls) || [];\nconst now = new Date().toISOString();\n\nconst seen = { urls: { ...(prior.urls || {}) } };\nfor (const u of newUrls) {\n  if (!seen.urls[u]) seen.urls[u] = now;\n}\n\nconst cutoff = new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString();\nfor (const [u, ts] of Object.entries(seen.urls)) {\n  if (ts < cutoff) delete seen.urls[u];\n}\n\nconst json = JSON.stringify(seen, null, 2);\nreturn [{\n  json: { count: Object.keys(seen.urls).length },\n  binary: {\n    data: {\n      data: Buffer.from(json, 'utf8').toString('base64'),\n      mimeType: 'application/json',\n      fileName: 'seen.json'\n    }\n  }\n}];"
+      },
+      "id": "build-seen",
+      "name": "Build updated seen.json",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "/data/shared/rentals/seen.json",
+        "options": {}
+      },
+      "id": "write-seen",
+      "name": "Write seen.json",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Write today's L# -> listing mapping for tomorrow's feedback ingest.\nconst it = $input.first();\nconst date = it.json.sent_date;\nconst mapping = it.json.sent_mapping || {};\n\n// Skip if no listings (no email sent → no mapping needed)\nif (!date || Object.keys(mapping).length === 0) {\n  return [];\n}\n\nconst json = JSON.stringify({\n  date,\n  generated_at: new Date().toISOString(),\n  mapping\n}, null, 2);\n\nreturn [{\n  json: { date, count: Object.keys(mapping).length },\n  binary: {\n    data: {\n      data: Buffer.from(json, 'utf8').toString('base64'),\n      mimeType: 'application/json',\n      fileName: `sent-${date}.json`\n    }\n  }\n}];"
+      },
+      "id": "build-sent",
+      "name": "Build sent-mapping",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/data/shared/rentals/sent/sent-{{ $json.date }}.json",
+        "options": {}
+      },
+      "id": "write-sent",
+      "name": "Write sent-mapping file",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Daily 08:30 ET": {
+      "main": [
+        [
+          {
+            "node": "Read seen.json",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read preferences.json",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Feed List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Feed List": {
+      "main": [
+        [
+          {
+            "node": "For Each Feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "For Each Feed": {
+      "main": [
+        [
+          {
+            "node": "Parse Kijiji Cards",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Jina Reader",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jina Reader": {
+      "main": [
+        [
+          {
+            "node": "For Each Feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Kijiji Cards": {
+      "main": [
+        [
+          {
+            "node": "Dedup + Hard Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read seen.json": {
+      "main": [
+        []
+      ]
+    },
+    "Read preferences.json": {
+      "main": [
+        []
+      ]
+    },
+    "Dedup + Hard Filter": {
+      "main": [
+        [
+          {
+            "node": "Build Gemma Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Gemma Prompt": {
+      "main": [
+        [
+          {
+            "node": "Gemma Score (per listing)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemma Score (per listing)": {
+      "main": [
+        [
+          {
+            "node": "Merge LLM into listing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge LLM into listing": {
+      "main": [
+        [
+          {
+            "node": "Combine, Rank, Format Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine, Rank, Format Email": {
+      "main": [
+        [
+          {
+            "node": "Has new listings?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build updated seen.json",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build sent-mapping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build sent-mapping": {
+      "main": [
+        [
+          {
+            "node": "Write sent-mapping file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has new listings?": {
+      "main": [
+        [
+          {
+            "node": "SMTP: send summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Build updated seen.json": {
+      "main": [
+        [
+          {
+            "node": "Write seen.json",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Toronto",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": {
+    "node:Daily 08:30 ET": {
+      "recurrenceRules": []
+    },
+    "node:Dedup + Hard Filter": {
+      "prefs": {
+        "max_price": 3500,
+        "ideal_price": 2800,
+        "min_bedrooms": 3,
+        "min_bathrooms": 1.5,
+        "soft_signals": {
+          "garage_or_parking": 1.5,
+          "basement": 1,
+          "backyard": 2,
+          "ground_floor": 1,
+          "renovated": 0.5,
+          "near_park": 1,
+          "near_market": 1,
+          "cafe_neighborhood": 1,
+          "metro_walk": 0.5
+        },
+        "neighborhood_weights": {},
+        "likes": [],
+        "dislikes": []
+      },
+      "runSummary": {
+        "total_today": 206,
+        "new_count": 206,
+        "filtered_count": 55,
+        "run_at": "2026-04-09T15:52:02.879Z"
+      },
+      "priorSeen": {
+        "urls": {}
+      }
+    },
+    "node:Build Gemma Prompt": {},
+    "node:Combine, Rank, Format Email": {},
+    "node:Build updated seen.json": {}
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {},
+  "tags": []
+}

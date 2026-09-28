@@ -1,13 +1,13 @@
 Infrastructure only — no project code lives here.
 
-Docker start: `docker compose -p local-ai -f docker-compose.yml -f docker-compose.override.private.yml up -d`
-NEVER plain `docker compose up` — creates broken project without port bindings.
+**Stack (trimmed 2026-09-28, Ian):** two containers.
+- **SearXNG** `:8081` — every Claude session's search (`curl "http://localhost:8081/search?q=…&format=json"`) and the `search-tools` MCP server in `~/.claude/settings.json` (`scripts/search-mcp/server.py`). Config: `searxng/settings.yml` (gitignored; `searxng/settings-base.yml` + `settings.overrides.yml` + `bootstrap_searxng.sh` rebuild it).
+- **Open WebUI** `127.0.0.1:8080` — chat UI over Ollama on Brain (`BRAIN_IP` from `~/cgts/repo/src/swarms/cgts_config.py`). No Ollama runs here; Brain and Voice are the model hosts (`~/.claude/skills/local-inference`).
 
-Services: n8n(:5678), SearXNG(:8081), Open-WebUI(:8080), Postgres(:5433), Redis(:6379), cortex-vault-api(:8000 loopback), MinIO(:9010).
-LangFuse moved to Brain (10.0.0.1:3000).
-M Brain starts from here: `start_m_brain.sh`.
-Retired 2026-04-19 (Brief 8b): `cortex-neo4j-cortex` (was :7474/:7687) + `qdrant` (was :6333). Volumes preserved on disk for rollback.
-Volume neo4j-brain-data (old M-graph, :7475) archived — EXPIRY 2026-07-12, then `docker volume rm neo4j-brain-data`.
+Start: `docker compose -p localai -f docker-compose.yml -f docker-compose.override.private.yml up -d` — the crontab `@reboot` line runs exactly this. NEVER plain `docker compose up` (wrong project name, no port bindings).
 
-Project code lives under `~/cgts/`, `~/memory/`, `~/local-ai/` (sibling dirs, consolidated 2026-04-08).
-Cross-project source of truth: `~/memory/brainstorm.db` (query it, don't hardcode).
+`scripts/ollama-mcp.mjs` is the other MCP server Claude Code loads from here (points at Brain).
+
+**Retired 2026-09-28** (evidence: n8n held zero workflows; Caddy had no hostnames and zero requests in 10 days; the ollama-* services were profile-gated and never started; the rest was upstream coleam00/local-ai-packaged template residue): n8n, Postgres, MinIO, Caddy, Flowise, Supabase vendored repo (1.0 GB), the disabled Neo4j bind mount (523 MB), the Open WebUI 0.9.5 backup tar (963 MB), Langfuse/Caddy/n8n Docker volumes, `docker-compose.cortex.yml` (vault-api never ran here). 2.5 GB → ~10 MB. Old files: `git show f15c47b:<path>`. `archive/shared_rentals_n8n_data_2026-05` holds the last n8n `shared/` mount.
+
+Earlier retirements: Langfuse → Brain; `cortex-neo4j-cortex` + `qdrant` 2026-04-19; `neo4j-brain-data` volume expired 2026-07-12. `~/memory/brainstorm.db` retired 2026-09-28 (see `~/memory/archive/`).

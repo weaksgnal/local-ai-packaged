@@ -1,0 +1,144 @@
+{
+  "id": "xNxQ2grKNLQ43izi",
+  "name": "rental-feedback",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "mailbox": "INBOX",
+        "postProcessAction": "read",
+        "downloadAttachments": false,
+        "format": "simple",
+        "options": {
+          "customEmailConfig": "[\"UNSEEN\", [\"SUBJECT\", \"Rental Watcher\"]]",
+          "forceReconnect": 20,
+          "trackLastMessageId": true
+        }
+      },
+      "id": "imap-trigger",
+      "name": "Email Trigger (IMAP)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.1,
+      "position": [
+        -200,
+        0
+      ],
+      "credentials": {
+        "imap": {
+          "id": "BPJJhvbs5vXbK85F",
+          "name": "Personal Gmail IMAP"
+        }
+      },
+      "notes": "Polls Gmail INBOX every minute for UNSEEN messages whose subject contains 'Rental Watcher'. Marks them as read after processing so we don't reprocess. Uses the existing Personal Gmail IMAP credential \u2014 no Gmail OAuth2 needed. Reusable pattern for other email-driven workflows: swap the SUBJECT filter and the downstream parser."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Match L# tags from an IMAP-delivered reply against recent sent-mapping\n// files, and load preferences.json. Outputs the same shape the existing\n// \"Apply feedback to preferences\" node expects: { feedbacks, prior_prefs }.\n//\n// Reusable email-app pattern:\n//   * IMAP trigger fires once per matching message\n//   * Skip non-replies (subject doesn't start with \"Re:\")\n//   * Parse the message body for command tokens (here: L# + sentiment)\n//   * Resolve each token against on-disk state (here: sent-YYYY-MM-DD.json)\n//   * Hand off to a downstream \"Apply\" code node\n//\n// Other email-driven projects can copy this node verbatim and just swap:\n//   - the regex used to extract command tokens\n//   - the on-disk state directory + filename pattern\n//   - the lookup function\n\nconst fs = require('fs');\nconst path = require('path');\n\nconst SHARED_DIR = '/data/shared/rentals';\nconst SENT_DIR   = path.join(SHARED_DIR, 'sent');\nconst PREFS_PATH = path.join(SHARED_DIR, 'preferences.json');\n\n// Acceptable thumbs/keywords (case-insensitive)\nconst POS_PAT = /(?:\ud83d\udc4d|\\blike\\b|\\blove\\b|\\byes\\b|\\bgood\\b|\\b\\+\\b)/i;\nconst NEG_PAT = /(?:\ud83d\udc4e|\\bdislike\\b|\\bno\\b|\\bbad\\b|\\bhate\\b|\\B-\\B)/i;\nconst TAG_PAT = /\\bL(\\d+)\\b([^\\n]*)/gi;\n\n// Load all sent-mappings, newest-first, so a delayed reply still resolves.\n// Returns: array of {date, mapping}\nfunction loadSentMappings() {\n  let files;\n  try {\n    files = fs.readdirSync(SENT_DIR)\n      .filter(f => /^sent-\\d{4}-\\d{2}-\\d{2}\\.json$/.test(f))\n      .sort()\n      .reverse();\n  } catch (e) {\n    return [];\n  }\n  const out = [];\n  for (const f of files.slice(0, 14)) {  // last 14 days is enough\n    try {\n      const raw = fs.readFileSync(path.join(SENT_DIR, f), 'utf8');\n      const obj = JSON.parse(raw);\n      // Support both shapes: {mapping: {L1: ...}} OR {L1: ...}\n      const mapping = obj.mapping || obj;\n      out.push({ date: f.replace(/^sent-|\\.json$/g, ''), mapping });\n    } catch (e) { /* skip malformed */ }\n  }\n  return out;\n}\n\nfunction loadPrefs() {\n  try {\n    return JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8'));\n  } catch (e) {\n    return null;\n  }\n}\n\n// Strip the quoted reply trailer (\"On <date> <name> wrote:\" and below)\nfunction stripQuotedReply(body) {\n  return (body || '').split(/\\n\\s*On .+wrote:/)[0].slice(0, 4000);\n}\n\nconst messages = $input.all();\nconst prefs = loadPrefs();\nif (!prefs) {\n  return [{ json: { __error: 'preferences.json missing or unparseable; aborting' } }];\n}\n\nconst sentMappings = loadSentMappings();\nconst feedbacks = [];\n\nfor (const m of messages) {\n  const msg = m.json;\n  const subject = String(msg.subject || '');\n  // Drop the watcher's OWN outgoing self-loops (Gmail mirrors self-sends to inbox)\n  if (!/^\\s*Re:/i.test(subject)) continue;\n\n  // IMAP simple format gives us text directly \u2014 no base64 decode needed\n  const body = stripQuotedReply(msg.textPlain || msg.text || msg.textHtml || msg.textAsHtml || '');\n\n  let mt;\n  TAG_PAT.lastIndex = 0;\n  while ((mt = TAG_PAT.exec(body)) !== null) {\n    const tag = `L${mt[1]}`;\n    const trail = (mt[2] || '').trim();\n    const isPos = POS_PAT.test(trail);\n    const isNeg = NEG_PAT.test(trail);\n    if (!isPos && !isNeg) continue;\n\n    // Resolve tag against the most recent mapping that contains it\n    let listing = null;\n    let resolvedFromDate = null;\n    for (const sm of sentMappings) {\n      if (sm.mapping && sm.mapping[tag]) {\n        listing = sm.mapping[tag];\n        resolvedFromDate = sm.date;\n        break;\n      }\n    }\n    if (!listing) continue;  // tag not found in any recent mapping\n\n    feedbacks.push({\n      tag,\n      sentiment: isPos ? 'like' : 'dislike',\n      comment: trail.replace(POS_PAT, '').replace(NEG_PAT, '').trim(),\n      listing,\n      message_id: msg.messageId || null,\n      received_at: msg.date ? new Date(msg.date).toISOString() : null,\n      resolved_from: resolvedFromDate,\n    });\n  }\n}\n\nreturn [{ json: { feedbacks, prior_prefs: prefs } }];\n"
+      },
+      "id": "match-and-load",
+      "name": "Match L# tags + load prefs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Reusable email-app pattern: parse the IMAP message body for command tokens, resolve them against on-disk state, hand off to a downstream Apply node. To reuse: swap the TAG_PAT regex and the loadSentMappings/lookup logic."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Update preferences.json with the new feedback.\n// Strategy: extract neighborhood + distinctive keywords from each rated listing,\n// then append to prefs.likes / prefs.dislikes (deduped).\n//\n// Also write a feedback-log.jsonl entry for human inspection.\n\nconst it = $input.first();\nif (it.json.__error) return [{ json: { error: it.json.__error } }];\n\nconst { feedbacks, prior_prefs } = it.json;\nif (!feedbacks || feedbacks.length === 0) {\n  // No feedback to apply \u2014 return current prefs unchanged so we still write a no-op\n  const noop = JSON.stringify(prior_prefs, null, 2);\n  return [{\n    json: { applied: 0, message: 'no feedback found' },\n    binary: {\n      prefs: {\n        data: Buffer.from(noop, 'utf8').toString('base64'),\n        mimeType: 'application/json',\n        fileName: 'preferences.json'\n      },\n      log: {\n        data: Buffer.from('', 'utf8').toString('base64'),\n        mimeType: 'application/jsonl',\n        fileName: 'feedback-log.jsonl'\n      }\n    }\n  }];\n}\n\nconst prefs = JSON.parse(JSON.stringify(prior_prefs));\nprefs.likes = prefs.likes || [];\nprefs.dislikes = prefs.dislikes || [];\n\nfunction extractKeywords(listing) {\n  const out = new Set();\n  const haystack = `${listing.title || ''} ${listing.location || ''}`.toLowerCase();\n  const hoods = ['rosemont', 'mile end', 'mile-end', 'plateau', 'villeray', 'outremont', 'petite-patrie', 'petite italie', 'little italy', 'jean-talon', 'beaubien', 'maisonneuve', 'masson', 'laurier'];\n  for (const h of hoods) if (haystack.includes(h)) out.add(h);\n  const desc = ['sous-sol', 'rdc', 'rdj', 'duplex', 'triplex', 'maison', 'townhouse', 'r\u00e9nov\u00e9', 'renovated', 'garage', 'stationnement', 'cour', 'jardin', 'terrasse', 'basement'];\n  for (const d of desc) if (haystack.includes(d)) out.add(d);\n  return [...out];\n}\n\nconst applied = [];\nfor (const fb of feedbacks) {\n  const kws = extractKeywords(fb.listing);\n  if (fb.comment && fb.comment.length > 2 && fb.comment.length < 80) {\n    kws.push(fb.comment.toLowerCase());\n  }\n  const target = fb.sentiment === 'like' ? prefs.likes : prefs.dislikes;\n  for (const kw of kws) {\n    if (!target.includes(kw)) target.push(kw);\n  }\n  applied.push({ tag: fb.tag, sentiment: fb.sentiment, keywords_added: kws });\n}\n\nprefs.updated_at = new Date().toISOString();\nprefs.version = (prefs.version || 1) + 1;\n\nconst prefsJson = JSON.stringify(prefs, null, 2);\nconst logLines = feedbacks.map(fb => JSON.stringify({\n  ts: new Date().toISOString(),\n  tag: fb.tag,\n  sentiment: fb.sentiment,\n  comment: fb.comment,\n  listing_url: fb.listing.url,\n  listing_title: fb.listing.title,\n  message_id: fb.message_id,\n  resolved_from: fb.resolved_from,\n})).join('\\n') + '\\n';\n\nreturn [{\n  json: { applied: feedbacks.length, summary: applied, new_likes_count: prefs.likes.length, new_dislikes_count: prefs.dislikes.length },\n  binary: {\n    prefs: {\n      data: Buffer.from(prefsJson, 'utf8').toString('base64'),\n      mimeType: 'application/json',\n      fileName: 'preferences.json'\n    },\n    log: {\n      data: Buffer.from(logLines, 'utf8').toString('base64'),\n      mimeType: 'application/jsonl',\n      fileName: 'feedback-log.jsonl'\n    }\n  }\n}];\n"
+      },
+      "id": "apply-feedback",
+      "name": "Apply feedback to preferences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "/data/shared/rentals/preferences.json",
+        "dataPropertyName": "prefs",
+        "options": {}
+      },
+      "id": "write-prefs",
+      "name": "Write preferences.json",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        400,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "/data/shared/rentals/feedback-log.jsonl",
+        "dataPropertyName": "log",
+        "options": {
+          "append": true
+        }
+      },
+      "id": "append-log",
+      "name": "Append feedback-log.jsonl",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        400,
+        100
+      ]
+    }
+  ],
+  "connections": {
+    "Email Trigger (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "Match L# tags + load prefs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match L# tags + load prefs": {
+      "main": [
+        [
+          {
+            "node": "Apply feedback to preferences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply feedback to preferences": {
+      "main": [
+        [
+          {
+            "node": "Write preferences.json",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Append feedback-log.jsonl",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Toronto"
+  },
+  "staticData": null,
+  "meta": {},
+  "pinData": {},
+  "tags": []
+}

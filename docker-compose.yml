@@ -1,57 +1,13 @@
-include:
-  # - ./supabase/docker/docker-compose.yml
+# local-ai — trimmed 2026-09-28 (Ian): the stack is Open WebUI + SearXNG.
+# Retired in this pass (see CLAUDE.md for the evidence):
+#   n8n + postgres + minio (n8n held zero workflows), caddy (no hostnames, zero
+#   requests in 10 days; both services publish their own ports), the profile-gated
+#   ollama-* services (Brain 10.0.0.1 / Voice 10.0.0.3 are the Ollama hosts),
+#   flowise/langfuse/neo4j/qdrant/supabase (retired earlier, residue removed).
+# Full previous file: git show f15c47b:docker-compose.yml
 
 volumes:
-  n8n_storage:
-  ollama_storage:
-  # qdrant_storage: RETIRED 2026-04-19 (Brief 8b) — preserved for rollback.
-  qdrant_storage:
   open-webui:
-  caddy-data:
-  caddy-config:
-  langfuse_postgres_data:
-  langfuse_minio_data:
-
-x-n8n: &service-n8n
-  image: n8nio/n8n:latest
-  environment:
-    - DB_TYPE=postgresdb
-    - DB_POSTGRESDB_HOST=postgres
-    - DB_POSTGRESDB_USER=postgres
-    - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-    - DB_POSTGRESDB_DATABASE=postgres
-    - N8N_DIAGNOSTICS_ENABLED=false
-    - N8N_PERSONALIZATION_ENABLED=false
-    - N8N_ENCRYPTION_KEY
-    - N8N_USER_MANAGEMENT_JWT_SECRET
-    - WEBHOOK_URL=${N8N_HOSTNAME:+https://}${N8N_HOSTNAME:-http://localhost:5678}
-    # Enable LocalFileTrigger and ExecuteCommand nodes
-    - NODES_EXCLUDE=[]
-    - GROQ_API_KEY=${GROQ_API_KEY}
-
-x-ollama: &service-ollama
-  image: ollama/ollama:latest
-  container_name: ollama
-  restart: unless-stopped
-  expose:
-    - 11434/tcp
-  environment:
-    - OLLAMA_CONTEXT_LENGTH=8192
-    - OLLAMA_FLASH_ATTENTION=1
-    - OLLAMA_KV_CACHE_TYPE=q8_0
-    - OLLAMA_MAX_LOADED_MODELS=2
-  volumes:
-    - ollama_storage:/root/.ollama
-
-x-init-ollama: &init-ollama
-  image: ollama/ollama:latest
-  container_name: ollama-pull-llama
-  volumes:
-    - ollama_storage:/root/.ollama
-  entrypoint: /bin/sh
-  command:
-    - "-c"
-    - "sleep 3; OLLAMA_HOST=ollama:11434 ollama pull qwen2.5:7b-instruct-q4_K_M; OLLAMA_HOST=ollama:11434 ollama pull nomic-embed-text"
 
 services:
   open-webui:
@@ -64,115 +20,6 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - open-webui:/app/backend/data
-
-  n8n:
-    <<: *service-n8n
-    container_name: n8n
-    restart: unless-stopped
-    expose:
-      - 5678/tcp
-    volumes:
-      - n8n_storage:/home/node/.n8n
-      - ./n8n/backup:/backup
-      - ./shared:/data/shared
-      - /Users/ianarthur/Library/CloudStorage/GoogleDrive-ian@riseautomation.ca/Shared drives/Rise/09_Platform/Data:/rise-data
-      - /Users/ianarthur/Library/Application Support/Granola:/granola-config:ro
-
-  # ── qdrant RETIRED 2026-04-19 (Brief 8b) ────────────────────────────
-  # Service definition removed. Cortex Swift client moved off Qdrant
-  # search to in-process SQLite during 9l-first arc. Volume `qdrant_storage`
-  # preserved on disk for rollback (declared at top of file).
-
-  # DISABLED 2026-03-28: Mac Mini is production Neo4j target
-#  neo4j:
-#    image: neo4j:latest
-#    volumes:
-#        - ./neo4j/logs:/logs
-#        - ./neo4j/config:/config
-#        - ./neo4j/data:/data
-#        - ./neo4j/plugins:/plugins
-#    expose:
-#      - 7473/tcp
-#      - 7474/tcp
-#      - 7687/tcp
-#    environment:
-#        - NEO4J_AUTH=${NEO4J_AUTH:-"neo4j/your_password"}
-#    restart: always
-#
-  caddy:
-    container_name: caddy
-    image: docker.io/library/caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - 80:80/tcp
-      - 443:443/tcp
-    expose:
-      - 2019/tcp
-      - 443/tcp
-      - 443/udp
-      - 80/tcp
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./caddy-addon:/etc/caddy/addons:ro
-      - caddy-data:/data:rw
-      - caddy-config:/config:rw
-    environment:
-      - N8N_HOSTNAME=${N8N_HOSTNAME:-":8001"}
-      - WEBUI_HOSTNAME=${WEBUI_HOSTNAME:-":8002"}
-      - FLOWISE_HOSTNAME=${FLOWISE_HOSTNAME:-":8003"}
-      - OLLAMA_HOSTNAME=${OLLAMA_HOSTNAME:-":8004"}
-      - SUPABASE_HOSTNAME=${SUPABASE_HOSTNAME:-":8005"}
-      - SEARXNG_HOSTNAME=${SEARXNG_HOSTNAME:-":8006"}
-      - LANGFUSE_HOSTNAME=${LANGFUSE_HOSTNAME:-":8007"}
-      - NEO4J_HOSTNAME=${NEO4J_HOSTNAME:-":8008"}
-      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-internal}
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "1m"
-        max-file: "1"
-
-  minio:
-    image: minio/minio
-    restart: always
-    entrypoint: sh
-    # create the 'langfuse' bucket before starting the service
-    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
-    expose:
-      - 9000/tcp
-      - 9001/tcp
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      - langfuse_minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 1s
-      timeout: 5s
-      retries: 5
-      start_period: 1s
-
-  postgres:
-    image: postgres:${POSTGRES_VERSION:-17}
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 3s
-      timeout: 3s
-      retries: 10
-    expose:
-      - 5432/tcp
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: postgres
-    volumes:
-      - langfuse_postgres_data:/var/lib/postgresql/data
 
   searxng:
     container_name: searxng
@@ -197,45 +44,3 @@ services:
       options:
         max-size: "1m"
         max-file: "1"
-
-  ollama-cpu:
-    profiles: ["cpu"]
-    <<: *service-ollama
-
-  ollama-gpu:
-    profiles: ["gpu-nvidia"]
-    <<: *service-ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  ollama-gpu-amd:
-    profiles: ["gpu-amd"]
-    <<: *service-ollama
-    image: ollama/ollama:rocm
-    devices:
-      - "/dev/kfd"
-      - "/dev/dri"
-
-  ollama-pull-llama-cpu:
-    profiles: ["cpu"]
-    <<: *init-ollama
-    depends_on:
-      - ollama-cpu
-
-  ollama-pull-llama-gpu:
-    profiles: ["gpu-nvidia"]
-    <<: *init-ollama
-    depends_on:
-      - ollama-gpu
-
-  ollama-pull-llama-gpu-amd:
-    profiles: [gpu-amd]
-    <<: *init-ollama
-    image: ollama/ollama:rocm
-    depends_on:
-     - ollama-gpu-amd
